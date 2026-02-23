@@ -41,6 +41,13 @@ const {
   getConnection,
 } = require('../rustplus/index.js');
 
+// --- ADDED: Map marker poller — timer state queries ---
+const {
+  getTimerSummary,
+  getTimerState,
+  getSingleTimerMessage,
+} = require('../rustplus/mapPoller.js');
+
 // ---------------------------------------------------------------------------
 // Discord client (exported so other modules may reference it if needed)
 // ---------------------------------------------------------------------------
@@ -123,6 +130,11 @@ const commandDefinitions = [
     .addStringOption((opt) =>
       opt.setName('message').setDescription('Message to send').setRequired(true)
     ),
+
+  // --- ADDED: /timers command ---
+  new SlashCommandBuilder()
+    .setName('timers')
+    .setDescription('Show current Cargo, Heli, Bradley, and Oil Rig event timers'),
 ];
 
 // ---------------------------------------------------------------------------
@@ -592,6 +604,37 @@ async function handleSay(interaction) {
   }
 }
 
+/**
+ * /timers
+ * Shows current Cargo Ship, Patrol Heli, Bradley APC, and Oil Rig event timers.
+ *
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ */
+async function handleTimers(interaction) {
+  await interaction.deferReply({ ephemeral: false });
+
+  const guildId = interaction.guildId;
+
+  const pairing = getPairingForGuild(guildId);
+  if (!pairing) {
+    return replyError(interaction, 'No Rust server linked to this guild. Use /setup first.');
+  }
+
+  const ip   = pairing.rust_server_ip;
+  const port = pairing.rust_server_port;
+
+  const summary = getTimerSummary(ip, port);
+
+  const embed = new EmbedBuilder()
+    .setTitle('\u23F1\uFE0F Event Timers')
+    .setDescription(summary)
+    .setColor(0x5865F2)
+    .setFooter({ text: `Server: ${ip}:${port}` })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
 // ---------------------------------------------------------------------------
 // Interaction router
 // ---------------------------------------------------------------------------
@@ -605,6 +648,7 @@ const commandHandlers = new Map([
   ['storage', handleStorage],
   ['status',  handleStatus],
   ['say',     handleSay],
+  ['timers',  handleTimers],  // --- ADDED ---
 ]);
 
 // ---------------------------------------------------------------------------
@@ -736,6 +780,137 @@ function wireConnectionEvents(connection) {
 
     channel.send({ embeds: [embed] }).catch((err) =>
       console.error(`[Bot] Failed to forward switchChanged to Discord: ${err.message}`)
+    );
+  });
+
+  // -- teamChat !commands --------------------------------------------------
+  // Listen for team chat messages starting with '!' and respond with timer info.
+  connection.on('teamChat', (payload) => {
+    const text = (payload.message || '').trim();
+    if (!text.startsWith('!')) return;
+
+    const cmd = text.toLowerCase().split(/\s+/)[0]; // e.g. '!cargo'
+    const timers = getTimerState(connection.serverIp, connection.serverPort);
+
+    if (cmd === '!cargo' && timers) {
+      const msg = getSingleTimerMessage('cargo', timers.cargo);
+      try {
+        const rustClient = connection.getClient();
+        if (rustClient && connection.isConnected()) rustClient.sendTeamMessage(msg);
+      } catch (err) {
+        console.warn('[Bot] !cargo sendTeamMessage failed:', err.message);
+      }
+    } else if (cmd === '!heli' && timers) {
+      const msg = getSingleTimerMessage('heli', timers.heli);
+      try {
+        const rustClient = connection.getClient();
+        if (rustClient && connection.isConnected()) rustClient.sendTeamMessage(msg);
+      } catch (err) {
+        console.warn('[Bot] !heli sendTeamMessage failed:', err.message);
+      }
+    } else if (cmd === '!bradley' && timers) {
+      const msg = getSingleTimerMessage('bradley', timers.bradley);
+      try {
+        const rustClient = connection.getClient();
+        if (rustClient && connection.isConnected()) rustClient.sendTeamMessage(msg);
+      } catch (err) {
+        console.warn('[Bot] !bradley sendTeamMessage failed:', err.message);
+      }
+    } else if ((cmd === '!oil' || cmd === '!oilrig') && timers) {
+      const msg = getSingleTimerMessage('oilrig', timers.oilrig);
+      try {
+        const rustClient = connection.getClient();
+        if (rustClient && connection.isConnected()) rustClient.sendTeamMessage(msg);
+      } catch (err) {
+        console.warn('[Bot] !oil sendTeamMessage failed:', err.message);
+      }
+    } else if (cmd === '!timers') {
+      const summary = getTimerSummary(connection.serverIp, connection.serverPort);
+      // Split into lines and send each as a separate message (team chat has length limits)
+      const lines = summary.split('\n');
+      try {
+        const rustClient = connection.getClient();
+        if (rustClient && connection.isConnected()) {
+          for (const line of lines) {
+            rustClient.sendTeamMessage(line);
+          }
+        }
+      } catch (err) {
+        console.warn('[Bot] !timers sendTeamMessage failed:', err.message);
+      }
+    }
+    // Unknown !command — ignore silently
+  });
+
+  // -- spawn (map marker appeared) -----------------------------------------
+  // Emitted by mapPoller when a tracked entity spawns on the map.
+  connection.on('spawn', (payload) => {
+    const channel = resolveChannel();
+    if (!channel) return;
+
+    const titles = {
+      cargo:   '\uD83D\uDEA2 Cargo Ship Spawned',
+      heli:    '\uD83D\uDE81 Patrol Helicopter Incoming',
+      bradley: '\uD83D\uDCA5 Bradley APC Active',
+      oilrig:  '\uD83D\uDEE2\uFE0F Oil Rig Locked',
+    };
+
+    const descriptions = {
+      cargo:   'Cargo Ship has appeared on the map!',
+      heli:    'Patrol Helicopter is incoming!',
+      bradley: 'Bradley APC is active at Launch Site!',
+      oilrig:  'Oil Rig is locked — scientists have been called!',
+    };
+
+    const title = titles[payload.event]   || `${payload.event} spawned`;
+    const desc  = descriptions[payload.event] || `${payload.event} has spawned.`;
+
+    const embed = new EmbedBuilder()
+      .setTitle(title)
+      .setDescription(desc)
+      .setColor(0x57F287) // green — spawn
+      .addFields({ name: 'Spawned At', value: payload.spawnedAt ? payload.spawnedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) : 'now', inline: true })
+      .setFooter({ text: serverLabel })
+      .setTimestamp();
+
+    channel.send({ embeds: [embed] }).catch((err) =>
+      console.error(`[Bot] Failed to forward spawn event to Discord: ${err.message}`)
+    );
+  });
+
+  // -- despawn (map marker disappeared) ------------------------------------
+  // Emitted by mapPoller when a tracked entity despawns from the map.
+  connection.on('despawn', (payload) => {
+    const channel = resolveChannel();
+    if (!channel) return;
+
+    const titles = {
+      cargo:   '\uD83D\uDEA2 Cargo Ship Left',
+      heli:    '\uD83D\uDE81 Patrol Helicopter Gone',
+      bradley: '\uD83D\uDCA5 Bradley APC Destroyed',
+      oilrig:  '\uD83D\uDEE2\uFE0F Oil Rig Crate Gone',
+    };
+
+    const descriptions = {
+      cargo:   'Cargo Ship has left the map.',
+      heli:    'Patrol Helicopter has been destroyed or left the map.',
+      bradley: 'Bradley APC has been destroyed. Respawns in ~30 min.',
+      oilrig:  'Oil Rig crate has been looted or timed out.',
+    };
+
+    const title = titles[payload.event]   || `${payload.event} despawned`;
+    const desc  = descriptions[payload.event] || `${payload.event} has despawned.`;
+
+    const embed = new EmbedBuilder()
+      .setTitle(title)
+      .setDescription(desc)
+      .setColor(0xED4245) // red — despawn
+      .addFields({ name: 'Despawned At', value: payload.despawnedAt ? payload.despawnedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) : 'now', inline: true })
+      .setFooter({ text: serverLabel })
+      .setTimestamp();
+
+    channel.send({ embeds: [embed] }).catch((err) =>
+      console.error(`[Bot] Failed to forward despawn event to Discord: ${err.message}`)
     );
   });
 

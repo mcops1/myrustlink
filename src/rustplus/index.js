@@ -31,6 +31,9 @@ const { logEvent, db } = require('../db/index.js');
 // --- ADDED: Event broadcaster (alarm + storage threshold → team chat) ---
 const { wireBroadcasters } = require('./broadcaster.js');
 
+// --- ADDED: Map marker poller (cargo / heli / bradley / oil rig timers) ---
+const { startPoller, stopPoller } = require('./mapPoller.js');
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -712,6 +715,9 @@ function createConnection(config) {
   // wireBroadcasters is idempotent; safe to call even if called again later.
   wireBroadcasters(connection, db);
 
+  // --- ADDED: Start map marker poller (cargo / heli / bradley / oil rig) ---
+  startPoller(connection);
+
   console.log(`[RustPlus] Connection created for ${key} (steamId: ${config.steamId})`);
   return connection;
 }
@@ -744,6 +750,8 @@ function removeConnection(ip, port) {
   }
 
   conn.disconnect();
+  // --- ADDED: Stop map marker poller for this connection ---
+  stopPoller(conn);
   connections.delete(key);
   console.log(`[RustPlus] Connection removed for ${key}`);
   return true;
