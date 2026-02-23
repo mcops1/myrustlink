@@ -292,10 +292,6 @@ class RustPlusConnection extends EventEmitter {
     // -- message (all broadcasts arrive here) ------------------------------
     rp.on('message', (message) => {
       try {
-        // Temporary debug logging — logs all incoming broadcasts
-        if (message && message.broadcast) {
-          console.log(`[RustPlus] Broadcast received on ${this.serverIp}:${this.serverPort}:`, JSON.stringify(message.broadcast).slice(0, 200));
-        }
         this._onMessage(message);
       } catch (err) {
         console.error(`[RustPlus] Unhandled error in message handler (${this.serverIp}:${this.serverPort}):`, err);
