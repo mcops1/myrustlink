@@ -1,16 +1,12 @@
-// Patches rustplus.js protobuf schema to make SellOrder fields optional.
-// Rust servers omit fields with default values, causing ProtocolError crashes.
+// Patches rustplus.js protobuf schema — replaces ALL `required` with `optional`.
+// Rust servers omit fields with default values; protobuf2 `required` throws a
+// ProtocolError crash when any required field is missing. Making everything
+// optional prevents crashes when the game server omits zero-value fields.
 const fs = require('fs');
 const f = 'node_modules/@liamcottle/rustplus.js/rustplus.proto';
 let content = fs.readFileSync(f, 'utf8');
-const fields = ['amountInStock', 'itemIsBlueprint', 'currencyIsBlueprint', 'itemCondition', 'itemConditionMax'];
-let count = 0;
-for (const field of fields) {
-  const before = content;
-  content = content.replace(`required int32 ${field}`, `optional int32 ${field}`);
-  content = content.replace(`required bool ${field}`, `optional bool ${field}`);
-  content = content.replace(`required float ${field}`, `optional float ${field}`);
-  if (content !== before) count++;
-}
+const before = content;
+content = content.replace(/\brequired\b/g, 'optional');
+const count = (before.match(/\brequired\b/g) || []).length;
 fs.writeFileSync(f, content);
-console.log(`Patched ${count} field(s) in ${f}`);
+console.log(`Patched ${count} required -> optional in ${f}`);
