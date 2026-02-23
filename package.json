@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "postinstall": "sed -i 's/required int32 amountInStock = 5/optional int32 amountInStock = 5/' node_modules/@liamcottle/rustplus.js/rustplus.proto || true"
   },
   "dependencies": {
     "@liamcottle/rustplus.js": "^2.5.0",
