@@ -69,6 +69,27 @@ const POLL_INTERVAL_MS = 10 * 1000; // 10 seconds
 const pollerMap = new Map();
 
 // ---------------------------------------------------------------------------
+// Grid coordinate conversion
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert Rust map x/y coordinates to a grid reference like "D5".
+ * Rust maps use 150-unit grid cells. y=0 is the bottom of the map.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} mapSize  — map width/height in units (e.g. 4000)
+ * @returns {string}
+ */
+function _coordToGrid(x, y, mapSize) {
+  if (!mapSize) return '??';
+  const cellSize = 150;
+  const col = Math.floor(x / cellSize);
+  const row = Math.floor((mapSize - y) / cellSize);
+  const colLetter = String.fromCharCode(65 + col);
+  return `${colLetter}${row + 1}`;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -332,6 +353,7 @@ function startPoller(connection) {
 
   const state = {
     intervalHandle: null,
+    mapSize: 0,
     timers: {
       cargo:   _blankTimer(),
       heli:    _blankTimer(),
@@ -345,6 +367,20 @@ function startPoller(connection) {
   state.intervalHandle = setInterval(() => {
     _tick(connection, state);
   }, POLL_INTERVAL_MS);
+
+  // Fetch map size once after connection settles — used for grid coordinate conversion
+  setTimeout(() => {
+    if (!pollerMap.has(key)) return;
+    const client = connection.getClient();
+    if (!client) return;
+    client.getMap((msg) => {
+      try {
+        if (msg.response && msg.response.map && msg.response.map.width) {
+          state.mapSize = msg.response.map.width;
+        }
+      } catch (e) { /* ignore */ }
+    });
+  }, 3000);
 
   // Run first tick immediately (after a short delay to allow connection to settle)
   setTimeout(() => {
@@ -458,6 +494,56 @@ function getSingleTimerMessage(eventName, timer) {
 }
 
 // ---------------------------------------------------------------------------
+// Live crate status query
+// ---------------------------------------------------------------------------
+
+/**
+ * Query the live map for locked crate markers and return a status message.
+ * Calls getMapMarkers() in real-time rather than relying on cached timer state.
+ * Calls back with a string message suitable for team chat.
+ *
+ * @param {import('./index.js').RustPlusConnection} connection
+ * @param {function(string): void} callback
+ */
+function getLiveCrateStatus(connection, callback) {
+  if (!connection.isConnected()) {
+    return callback('🛢️ Oil Rig: not connected to server.');
+  }
+
+  const client = connection.getClient();
+  if (!client) return callback('🛢️ Oil Rig: client unavailable.');
+
+  const key = _key(connection.serverIp, connection.serverPort);
+  const state = pollerMap.get(key);
+  const mapSize = state ? state.mapSize : 0;
+
+  client.getMapMarkers((message) => {
+    try {
+      if (message.response && message.response.error) {
+        return callback('🛢️ Oil Rig: unable to query map right now.');
+      }
+
+      const markers = (message.response && message.response.mapMarkers && message.response.mapMarkers.markers) || [];
+      const crates = markers.filter((m) => m.type === MARKER_TYPE.CRATE);
+
+      if (crates.length === 0) {
+        return callback('🛢️ No locked crates active on the map.');
+      }
+
+      const lines = crates.map((crate, i) => {
+        const grid = _coordToGrid(crate.x || 0, crate.y || 0, mapSize);
+        const label = crates.length > 1 ? `Oil Rig Locked Crate #${i + 1}` : 'Oil Rig Locked Crate';
+        return `🛢️ ${label} active @ ${grid}`;
+      });
+
+      callback(lines.join(' | '));
+    } catch (err) {
+      callback('🛢️ Oil Rig: error reading map markers.');
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Module exports
 // ---------------------------------------------------------------------------
 
@@ -467,6 +553,7 @@ module.exports = {
   getTimerState,
   getTimerSummary,
   getSingleTimerMessage,
+  getLiveCrateStatus,
   // Exported for testing
   MARKER_TYPE,
   RESPAWN_MS,

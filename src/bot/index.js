@@ -46,6 +46,7 @@ const {
   getTimerSummary,
   getTimerState,
   getSingleTimerMessage,
+  getLiveCrateStatus,
 } = require('../rustplus/mapPoller.js');
 
 // ---------------------------------------------------------------------------
@@ -817,7 +818,8 @@ function wireConnectionEvents(connection) {
     } else if (cmd === '!bradley') {
       reply(timers ? getSingleTimerMessage('bradley', timers.bradley) : '💥 Bradley: unknown (bot just started)');
     } else if (cmd === '!oil' || cmd === '!oilrig') {
-      reply(timers ? getSingleTimerMessage('oilrig', timers.oilrig) : '🛢️ Oil Rig: unknown (bot just started)');
+      // Live query — checks actual map markers for current crate status and grid position
+      getLiveCrateStatus(connection, (msg) => reply(msg));
     } else if (cmd === '!timers') {
       const summary = getTimerSummary(connection.serverIp, connection.serverPort);
       // Split into lines and send each as a separate message (team chat has length limits)
