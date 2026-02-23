@@ -808,7 +808,9 @@ function wireConnectionEvents(connection) {
 
     console.log(`[Bot] Team chat command received: ${cmd} on ${connection.serverIp}:${connection.serverPort}`);
 
-    if (cmd === '!cargo') {
+    if (cmd === '!banana') {
+      reply('Farm Wood');
+    } else if (cmd === '!cargo') {
       reply(timers ? getSingleTimerMessage('cargo', timers.cargo) : '🚢 Cargo: unknown (bot just started)');
     } else if (cmd === '!heli') {
       reply(timers ? getSingleTimerMessage('heli', timers.heli) : '🚁 Heli: unknown (bot just started)');
