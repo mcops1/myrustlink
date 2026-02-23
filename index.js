@@ -41,6 +41,7 @@ const { db }                        = require('./src/db/index.js');
 const { startWebServer }            = require('./src/web/index.js');
 const { startBot, client, wireConnectionEvents } = require('./src/bot/index.js');
 const { createConnection, getAllConnections, removeConnection } = require('./src/rustplus/index.js');
+const { startFcmListener, stopFcmListener } = require('./src/rustplus/fcmListener.js');
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -185,6 +186,16 @@ async function bootstrap() {
     console.error('[App] Error wiring Discord event forwarding:', wireErr);
   }
 
+  // -------------------------------------------------------------------------
+  // Step 7: Start the FCM pairing listener (non-fatal if config is absent)
+  // -------------------------------------------------------------------------
+  try {
+    await startFcmListener();
+  } catch (err) {
+    console.error('[App] Error starting FCM listener:', err.message || err);
+    // Non-fatal — app continues without automatic FCM pairing
+  }
+
   console.log('[App] MyRustLink started successfully.');
   console.log(`[App] Web panel: ${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}`);
 }
@@ -210,6 +221,13 @@ function shutdown(signal) {
         );
       }
     }
+  }
+
+  // Stop the FCM pairing listener
+  try {
+    stopFcmListener();
+  } catch (err) {
+    console.error('[App] Error stopping FCM listener during shutdown:', err.message);
   }
 
   // Disconnect the Discord bot gateway

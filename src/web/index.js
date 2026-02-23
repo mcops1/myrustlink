@@ -18,6 +18,7 @@ const SteamStrategy = require('passport-steam').Strategy;
 
 const { db, logEvent, getRecentEvents } = require('../db/index.js');
 const { connections, createConnection, removeConnection } = require('../rustplus/index.js');
+const { isFcmListening, hasFcmConfig } = require('../rustplus/fcmListener.js');
 
 // ---------------------------------------------------------------------------
 // Minimal HTML escape utility
@@ -414,33 +415,37 @@ function configurePassport() {
   const realm     = `${process.env.BASE_URL || 'http://localhost:3000'}/`;
   const apiKey    = process.env.STEAM_API_KEY || '';
 
-  passport.use(
-    new SteamStrategy(
-      { returnURL, realm, apiKey },
-      /**
-       * Verify callback — called after Steam confirms authentication.
-       * @param {string} identifier  - Verified OpenID claimed_id URL
-       * @param {Object} profile     - Steam profile fetched via Steam Web API
-       * @param {Function} done
-       */
-      function verifyUser(identifier, profile, done) {
-        try {
-          const steamId    = profile.id;
-          const playerName = profile.displayName || '';
+  const steamStrategy = new SteamStrategy(
+    { returnURL, realm, apiKey, profile: false },
+    /**
+     * Verify callback — called after Steam confirms authentication.
+     * @param {string} identifier  - Verified OpenID claimed_id URL
+     * @param {Object} profile     - Steam profile (may be null if API key fails)
+     * @param {Function} done
+     */
+    function verifyUser(identifier, profile, done) {
+      try {
+        // Extract Steam ID from the OpenID identifier URL.
+        // Format: https://steamcommunity.com/openid/id/76561199145165600
+        const steamIdFromIdentifier = identifier ? identifier.replace(/^.*\//, '') : null;
+        const steamId    = (profile && profile.id) || steamIdFromIdentifier;
+        const playerName = (profile && profile.displayName) || '';
 
-          // Upsert user into SQLite; if Steam API key is missing, displayName
-          // may be empty — we store what we have and continue.
-          const user = upsertUser(steamId, playerName);
-
-          logEvent(steamId, 'login', `Steam login: ${playerName}`);
-          return done(null, user);
-        } catch (err) {
-          console.error('[Auth] Error in Steam verify callback:', err);
-          return done(err);
+        if (!steamId) {
+          return done(new Error('Could not determine Steam ID from login'));
         }
+
+        const user = upsertUser(steamId, playerName);
+        logEvent(steamId, 'login', `Steam login: ${playerName || steamId}`);
+        return done(null, user);
+      } catch (err) {
+        console.error('[Auth] Error in Steam verify callback:', err);
+        return done(err);
       }
-    )
+    }
   );
+
+  passport.use(steamStrategy);
 
   // Serialize: store only steam_id in the session cookie payload
   passport.serializeUser((user, done) => {
@@ -492,13 +497,41 @@ const asyncHandler = fn => (req, res, next) =>
  * Render the Rust+ token status panel.
  * If the user has no token, shows a form to enter one via POST /api/pair.
  * If the user has a token, shows a success badge with an option to re-pair.
+ * Also shows FCM listener status when the listener is active.
  * @param {Object} user - The user row from the DB
  * @returns {string} HTML string
  */
 function renderTokenPanel(user) {
-  const hasFcm = !!user.rust_plus_token;
+  const hasToken     = !!user.rust_plus_token;
+  const fcmListening = isFcmListening();
+  const fcmConfig    = hasFcmConfig();
 
-  if (hasFcm) {
+  // Build FCM status block
+  let fcmStatusHtml = '';
+  if (fcmListening) {
+    fcmStatusHtml = `
+      <div style="margin-top:1.25rem; background:#0f2a1a; border-left:4px solid #22c55e; padding:0.875rem 1rem; border-radius:4px; font-size:0.875rem;">
+        <div style="color:#4ade80; font-weight:600; margin-bottom:0.4rem;">&#10003; Listening for Rust+ pairings automatically</div>
+        <div style="color:#aaa; line-height:1.6;">
+          To pair: open Rust+ in-game &rarr; escape menu &rarr; <strong style="color:#e0e0e0;">Pair with Server</strong>.
+          Your token will update automatically when a pairing notification arrives.
+        </div>
+      </div>`;
+  } else if (fcmConfig) {
+    fcmStatusHtml = `
+      <div style="margin-top:1.25rem; background:#3f2000; border-left:4px solid #c8a96e; padding:0.875rem 1rem; border-radius:4px; font-size:0.875rem; color:#fcd34d;">
+        FCM config found but listener is not active. Check server logs for details.
+      </div>`;
+  } else {
+    fcmStatusHtml = `
+      <div style="margin-top:1.25rem; background:#1a1a2e; border-left:4px solid #2a2a4e; padding:0.875rem 1rem; border-radius:4px; font-size:0.875rem; color:#888;">
+        Automatic pairing not configured. Run
+        <code style="background:#0d1117; padding:0.15rem 0.4rem; border-radius:3px; color:#7dd3fc;">npx @liamcottle/rustplus.js fcm-register</code>
+        to enable automatic token updates.
+      </div>`;
+  }
+
+  if (hasToken) {
     return `
     <div class="panel">
       <div class="panel-title">Rust+ Token Status</div>
@@ -510,9 +543,10 @@ function renderTokenPanel(user) {
           Your player token is stored. You can re-pair below if needed.
         </span>
       </div>
+      ${fcmStatusHtml}
       <details style="margin-top:1.25rem;">
         <summary style="cursor:pointer; color:#7289da; font-size:0.85rem; user-select:none;">
-          Re-pair token
+          Re-pair token manually
         </summary>
         <form method="POST" action="/api/pair" style="margin-top:1rem;">
           <div class="token-form">
@@ -540,24 +574,30 @@ function renderTokenPanel(user) {
         Enter your Rust+ player token to enable server connections.
       </span>
     </div>
-    <p style="color:#aaa; font-size:0.85rem; margin-bottom:1rem; line-height:1.6;">
-      Obtain your token by running:
-      <code style="background:#0d1117; padding:0.2rem 0.5rem; border-radius:3px; color:#7dd3fc; font-size:0.8rem;">
-        npx @liamcottle/rustplus.js fcm-register
-      </code>
-      and following the prompts.
-    </p>
-    <form method="POST" action="/api/pair">
-      <div class="token-form">
-        <div class="field">
-          <label for="playerToken">Player Token</label>
-          <input type="text" id="playerToken" name="playerToken"
-                 placeholder="Paste your Rust+ player token"
-                 required autocomplete="off">
+    ${fcmStatusHtml}
+    <details style="margin-top:1.25rem;" ${fcmListening ? '' : 'open'}>
+      <summary style="cursor:pointer; color:#7289da; font-size:0.85rem; user-select:none; margin-bottom:0.75rem;">
+        ${fcmListening ? 'Enter token manually (fallback)' : 'Enter token manually'}
+      </summary>
+      <p style="color:#aaa; font-size:0.85rem; margin-bottom:1rem; line-height:1.6;">
+        Obtain your token by running:
+        <code style="background:#0d1117; padding:0.2rem 0.5rem; border-radius:3px; color:#7dd3fc; font-size:0.8rem;">
+          npx @liamcottle/rustplus.js fcm-register
+        </code>
+        and following the prompts.
+      </p>
+      <form method="POST" action="/api/pair">
+        <div class="token-form">
+          <div class="field">
+            <label for="playerToken">Player Token</label>
+            <input type="text" id="playerToken" name="playerToken"
+                   placeholder="Paste your Rust+ player token"
+                   required autocomplete="off">
+          </div>
+          <button type="submit" class="btn btn-primary">Save Token</button>
         </div>
-        <button type="submit" class="btn btn-primary">Save Token</button>
-      </div>
-    </form>
+      </form>
+    </details>
   </div>`;
 }
 
@@ -946,12 +986,23 @@ function mountRoutes(app) {
   // calling our verify callback — claimed_id is never trusted from params alone.
   app.get(
     '/auth/steam/callback',
-    passport.authenticate('steam', {
-      failureRedirect: '/login?error=auth_failed',
-    }),
-    (req, res) => {
-      // Authentication succeeded — session is already populated by passport
-      res.redirect('/dashboard');
+    (req, res, next) => {
+      passport.authenticate('steam', (err, user) => {
+        if (err) {
+          console.error('[Auth] Steam callback error:', err.message || err);
+          return res.redirect('/login?error=auth_failed');
+        }
+        if (!user) {
+          return res.redirect('/login?error=auth_failed');
+        }
+        req.logIn(user, (loginErr) => {
+          if (loginErr) {
+            console.error('[Auth] Session login error:', loginErr);
+            return res.redirect('/login?error=auth_failed');
+          }
+          return res.redirect('/dashboard');
+        });
+      })(req, res, next);
     }
   );
 
@@ -1009,6 +1060,16 @@ function mountRoutes(app) {
     res.json({
       hasFcmToken: !!user.rust_plus_token,
       steamId: user.steam_id,
+    });
+  });
+
+  // -- API: FCM listener status ----------------------------------------------
+  // Returns whether rustplus.config.json exists and whether the FCM listener
+  // is currently active. Useful for the dashboard and external monitoring.
+  app.get('/api/fcm-status', requireAuth, (req, res) => {
+    res.json({
+      hasConfig: hasFcmConfig(),
+      listening: isFcmListening(),
     });
   });
 
