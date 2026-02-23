@@ -525,10 +525,11 @@ function getLiveCrateStatus(connection, callback) {
 
       const markers = (message.response && message.response.mapMarkers && message.response.mapMarkers.markers) || [];
 
-      // Debug: log all marker types present
-      const typeCounts = {};
-      for (const m of markers) { typeCounts[m.type] = (typeCounts[m.type] || 0) + 1; }
-      console.log(`[MapPoller] getLiveCrateStatus marker types:`, JSON.stringify(typeCounts));
+      // Debug: log all markers with full data
+      console.log(`[MapPoller] getLiveCrateStatus all markers (${markers.length} total):`);
+      for (const m of markers) {
+        console.log(`  type=${m.type} id=${m.id} x=${m.x} y=${m.y} name=${m.name} steamId=${m.steamId}`);
+      }
 
       const crates = markers.filter((m) => m.type === MARKER_TYPE.CRATE);
 
