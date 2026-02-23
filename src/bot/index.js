@@ -581,7 +581,9 @@ async function handleSay(interaction) {
   const chatMessage = `[Discord] ${username}: ${message}`;
 
   try {
-    rustClient.sendTeamMessage(chatMessage);
+    rustClient.sendTeamMessage(chatMessage, (response) => {
+      console.log('[Bot] /say sendTeamMessage response:', JSON.stringify(response));
+    });
     console.log(`[Bot] /say: ${username} sent team message: ${message}`);
     await interaction.editReply({ content: '\u2705 Message sent to team chat.' });
   } catch (err) {
