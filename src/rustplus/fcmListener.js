@@ -239,17 +239,27 @@ function onDataReceived(data) {
     }
 
     const category = appDataMap['category'] || data.category || '';
-    const type     = appDataMap['type']     || data.type     || '';
+
+    // The 'type' and pairing details are inside the 'body' JSON string
+    let body = null;
+    try {
+      if (appDataMap['body']) {
+        body = JSON.parse(appDataMap['body']);
+      }
+    } catch (parseErr) {
+      console.warn('[FCM] Failed to parse notification body JSON:', parseErr.message);
+    }
+
+    const type = (body && body.type) || appDataMap['type'] || data.type || '';
 
     // Filter: only handle Rust+ server pairing notifications
     if (category !== 'com.facepunch.rust.companion' || type !== 'server') {
-      // Not a Rust+ server pairing — log at debug level and skip
       console.log(`[FCM] Notification received (category=${category}, type=${type}) — not a server pairing, skipping`);
       return;
     }
 
-    // Merge appDataMap into data for handlePairingNotification to use
-    const enrichedData = Object.assign({}, data, appDataMap);
+    // Merge appDataMap and parsed body into data for handlePairingNotification
+    const enrichedData = Object.assign({}, data, appDataMap, body || {});
     handlePairingNotification(enrichedData);
   } catch (err) {
     console.error('[FCM] Error processing notification:', err.message);
