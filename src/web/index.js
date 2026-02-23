@@ -514,7 +514,7 @@ function renderTokenPanel(user) {
         <div style="color:#4ade80; font-weight:600; margin-bottom:0.4rem;">&#10003; Listening for Rust+ pairings automatically</div>
         <div style="color:#aaa; line-height:1.6;">
           To pair: open Rust+ in-game &rarr; escape menu &rarr; <strong style="color:#e0e0e0;">Pair with Server</strong>.
-          Your token will update automatically when a pairing notification arrives.
+          Your token, server IP, port, and Discord channel will all be configured automatically.
         </div>
       </div>`;
   } else if (fcmConfig) {

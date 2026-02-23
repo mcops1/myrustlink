@@ -123,49 +123,88 @@ function handlePairingNotification(data) {
   }
 
   // -------------------------------------------------------------------------
-  // Step 2: Check if a server_pairing exists for this ip:port
+  // Resolve Discord routing env vars — warn if missing but continue
+  // -------------------------------------------------------------------------
+  const guildId   = process.env.DISCORD_GUILD_ID   || '';
+  const channelId = process.env.DISCORD_CHANNEL_ID || '';
+
+  if (!guildId || !channelId) {
+    console.warn(
+      '[FCM] DISCORD_GUILD_ID or DISCORD_CHANNEL_ID not set in environment. ' +
+      'Server pairing will be created without Discord channel routing.'
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Step 2: Check if a server_pairing exists for this ip:port + guild
   // -------------------------------------------------------------------------
   let existingPairing = null;
   try {
     existingPairing = db.prepare(
-      'SELECT * FROM server_pairings WHERE rust_server_ip = ? AND rust_server_port = ?'
-    ).get(ip, port);
+      'SELECT * FROM server_pairings WHERE rust_server_ip = ? AND rust_server_port = ? AND discord_guild_id = ?'
+    ).get(ip, port, guildId);
   } catch (dbErr) {
     console.error('[FCM] DB error checking server_pairings:', dbErr.message);
   }
 
   if (existingPairing) {
     // Pairing exists — reconnect with the updated token
-    console.log(`[FCM] Reconnecting to ${ip}:${port} with new token...`);
-
-    try {
-      removeConnection(ip, port);
-    } catch (removeErr) {
-      console.warn('[FCM] Error removing old connection:', removeErr.message);
-    }
-
-    try {
-      createConnection({
-        steamId:     steamId,
-        playerToken: Number(playerToken),
-        server: {
-          ip:   ip,
-          port: port,
-        },
-        guildId:   existingPairing.discord_guild_id   || undefined,
-        channelId: existingPairing.discord_channel_id || undefined,
-      });
-      console.log(`[FCM] Connection re-established for ${ip}:${port}`);
-    } catch (connErr) {
-      console.error('[FCM] Error creating connection after FCM pairing:', connErr.message);
-    }
+    console.log(`[FCM] Existing pairing found for ${ip}:${port} — reconnecting with new token...`);
   } else {
-    // No pairing in DB — token updated, user can add the server via dashboard
-    console.log(`[FCM] No server_pairing found for ${ip}:${port} — token saved, add the server via dashboard to connect`);
+    // No pairing — insert a new server_pairing row
+    try {
+      db.prepare(`
+        INSERT INTO server_pairings
+          (user_steam_id, rust_server_ip, rust_server_port, rust_server_name, discord_guild_id, discord_channel_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(steamId, ip, port, serverName, guildId, channelId);
+
+      console.log(`[FCM] Auto-paired server ${serverName} (${ip}:${port}) → Discord guild ${guildId} channel ${channelId}`);
+
+      logEvent(steamId, 'fcm_auto_paired', JSON.stringify({
+        server: `${ip}:${port}`,
+        serverName,
+        guildId,
+        channelId,
+        time: new Date().toISOString(),
+      }));
+
+      // Fetch the newly inserted row so connection uses its ids
+      existingPairing = db.prepare(
+        'SELECT * FROM server_pairings WHERE rust_server_ip = ? AND rust_server_port = ? AND discord_guild_id = ?'
+      ).get(ip, port, guildId);
+    } catch (dbErr) {
+      console.error('[FCM] DB error inserting server_pairing:', dbErr.message);
+    }
   }
 
   // -------------------------------------------------------------------------
-  // Step 3: Emit event for web dashboard / other subscribers
+  // Step 3: Remove old connection (if any) then create a fresh one
+  // -------------------------------------------------------------------------
+  try {
+    removeConnection(ip, port);
+  } catch (removeErr) {
+    console.warn('[FCM] Error removing old connection:', removeErr.message);
+  }
+
+  try {
+    createConnection({
+      steamId:     steamId,
+      playerToken: Number(playerToken),
+      server: {
+        ip:   ip,
+        port: port,
+      },
+      guildId:   (existingPairing && existingPairing.discord_guild_id)   || undefined,
+      channelId: (existingPairing && existingPairing.discord_channel_id) || undefined,
+    });
+    console.log(`[FCM] Connection established for ${ip}:${port}`);
+  } catch (connErr) {
+    console.error('[FCM] Error creating connection after FCM pairing:', connErr.message);
+  }
+
+  // -------------------------------------------------------------------------
+  // Step 4: Emit event for web dashboard / other subscribers
   // -------------------------------------------------------------------------
   fcmEvents.emit('pairingReceived', {
     steamId,
