@@ -791,49 +791,38 @@ function wireConnectionEvents(connection) {
 
     const cmd = text.toLowerCase().split(/\s+/)[0]; // e.g. '!cargo'
     const timers = getTimerState(connection.serverIp, connection.serverPort);
+    const rustClient = connection.getClient();
 
-    if (cmd === '!cargo' && timers) {
-      const msg = getSingleTimerMessage('cargo', timers.cargo);
+    // Helper to send a response — works even if timers state is not yet populated
+    function reply(msg) {
       try {
-        const rustClient = connection.getClient();
-        if (rustClient && connection.isConnected()) rustClient.sendTeamMessage(msg);
+        if (rustClient) rustClient.sendTeamMessage(msg, (res) => {
+          if (res && res.response && res.response.error) {
+            console.warn(`[Bot] ${cmd} reply error:`, res.response.error.error);
+          }
+        });
       } catch (err) {
-        console.warn('[Bot] !cargo sendTeamMessage failed:', err.message);
+        console.warn(`[Bot] ${cmd} sendTeamMessage failed:`, err.message);
       }
-    } else if (cmd === '!heli' && timers) {
-      const msg = getSingleTimerMessage('heli', timers.heli);
-      try {
-        const rustClient = connection.getClient();
-        if (rustClient && connection.isConnected()) rustClient.sendTeamMessage(msg);
-      } catch (err) {
-        console.warn('[Bot] !heli sendTeamMessage failed:', err.message);
-      }
-    } else if (cmd === '!bradley' && timers) {
-      const msg = getSingleTimerMessage('bradley', timers.bradley);
-      try {
-        const rustClient = connection.getClient();
-        if (rustClient && connection.isConnected()) rustClient.sendTeamMessage(msg);
-      } catch (err) {
-        console.warn('[Bot] !bradley sendTeamMessage failed:', err.message);
-      }
-    } else if ((cmd === '!oil' || cmd === '!oilrig') && timers) {
-      const msg = getSingleTimerMessage('oilrig', timers.oilrig);
-      try {
-        const rustClient = connection.getClient();
-        if (rustClient && connection.isConnected()) rustClient.sendTeamMessage(msg);
-      } catch (err) {
-        console.warn('[Bot] !oil sendTeamMessage failed:', err.message);
-      }
+    }
+
+    console.log(`[Bot] Team chat command received: ${cmd} on ${connection.serverIp}:${connection.serverPort}`);
+
+    if (cmd === '!cargo') {
+      reply(timers ? getSingleTimerMessage('cargo', timers.cargo) : '🚢 Cargo: unknown (bot just started)');
+    } else if (cmd === '!heli') {
+      reply(timers ? getSingleTimerMessage('heli', timers.heli) : '🚁 Heli: unknown (bot just started)');
+    } else if (cmd === '!bradley') {
+      reply(timers ? getSingleTimerMessage('bradley', timers.bradley) : '💥 Bradley: unknown (bot just started)');
+    } else if (cmd === '!oil' || cmd === '!oilrig') {
+      reply(timers ? getSingleTimerMessage('oilrig', timers.oilrig) : '🛢️ Oil Rig: unknown (bot just started)');
     } else if (cmd === '!timers') {
       const summary = getTimerSummary(connection.serverIp, connection.serverPort);
       // Split into lines and send each as a separate message (team chat has length limits)
-      const lines = summary.split('\n');
+      const lines = summary.split('\n').filter(l => l.trim());
       try {
-        const rustClient = connection.getClient();
-        if (rustClient && connection.isConnected()) {
-          for (const line of lines) {
-            rustClient.sendTeamMessage(line);
-          }
+        for (const line of lines) {
+          if (rustClient) rustClient.sendTeamMessage(line);
         }
       } catch (err) {
         console.warn('[Bot] !timers sendTeamMessage failed:', err.message);
