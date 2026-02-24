@@ -653,6 +653,85 @@ const commandHandlers = new Map([
 ]);
 
 // ---------------------------------------------------------------------------
+// Ollama LLM helper — used by !ask team chat command
+// ---------------------------------------------------------------------------
+
+/**
+ * Ask a question to the locally-running Ollama instance and get a short answer.
+ * Uses http (no external deps). Calls back with (err, answerString).
+ *
+ * Configurable via env vars:
+ *   OLLAMA_HOST  — default 127.0.0.1
+ *   OLLAMA_PORT  — default 11434
+ *   OLLAMA_MODEL — default llama3
+ *
+ * @param {string} question
+ * @param {function(Error|null, string|null): void} callback
+ */
+function askOllama(question, callback) {
+  const http = require('http');
+  const host  = process.env.OLLAMA_HOST  || '127.0.0.1';
+  const port  = parseInt(process.env.OLLAMA_PORT  || '11434', 10);
+  const model = process.env.OLLAMA_MODEL || 'llama3';
+
+  const body = JSON.stringify({
+    model,
+    messages: [
+      {
+        role: 'system',
+        content:
+          'You are a helpful assistant for Rust (the survival game). ' +
+          'Answer in 1-2 short sentences. Keep your reply under 200 characters.',
+      },
+      { role: 'user', content: question },
+    ],
+    stream: false,
+  });
+
+  const req = http.request(
+    {
+      hostname: host,
+      port,
+      path: '/api/chat',
+      method: 'POST',
+      headers: {
+        'Content-Type':   'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    },
+    (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const json   = JSON.parse(data);
+          const answer = (json.message && json.message.content)
+            ? json.message.content.trim()
+            : '';
+          // Rust+ team chat has ~256 char limit — stay well inside it
+          const trimmed = answer.length > 200
+            ? answer.slice(0, 197) + '...'
+            : answer;
+          callback(null, trimmed || 'No response from AI.');
+        } catch (err) {
+          callback(err, null);
+        }
+      });
+    }
+  );
+
+  req.on('error', (err) => callback(err, null));
+
+  req.setTimeout(20000, () => {
+    req.destroy();
+    callback(new Error('Ollama request timed out'), null);
+  });
+
+  req.write(body);
+  req.end();
+}
+
+// ---------------------------------------------------------------------------
 // Event forwarding — rustplus → Discord
 // ---------------------------------------------------------------------------
 
@@ -838,6 +917,22 @@ function wireConnectionEvents(connection) {
       } catch (err) {
         console.warn('[Bot] !timers sendTeamMessage failed:', err.message);
       }
+    } else if (cmd === '!ask') {
+      const question = text.slice('!ask'.length).trim();
+      if (!question) {
+        reply('Usage: !ask <your question>');
+        return;
+      }
+      reply('Thinking...');
+      askOllama(question, (err, answer) => {
+        if (err) {
+          console.error('[Bot] !ask Ollama error:', err.message);
+          reply('AI unavailable right now.');
+        } else {
+          console.log(`[Bot] !ask response: ${answer}`);
+          reply(answer);
+        }
+      });
     }
     // Unknown !command — ignore silently
   });
