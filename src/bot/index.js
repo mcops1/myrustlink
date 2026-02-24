@@ -680,8 +680,11 @@ function askOllama(question, callback) {
       {
         role: 'system',
         content:
-          'You are a helpful assistant for Rust (the survival game). ' +
-          'Answer in 1-2 short sentences. Keep your reply under 200 characters.',
+          'You are an assistant that ONLY answers questions about the video game Rust ' +
+          '(the survival game by Facepunch Studios). Every question is about Rust gameplay — ' +
+          'monuments, loot, PvP, farming, base building, events like Oil Rig, Cargo Ship, ' +
+          'Patrol Heli, Bradley, etc. Never assume a question is about anything other than ' +
+          'the game Rust. Answer in 1-2 short sentences. Keep your reply under 200 characters.',
       },
       { role: 'user', content: question },
     ],
