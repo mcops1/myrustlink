@@ -684,7 +684,16 @@ function askOllama(question, callback) {
           '(the survival game by Facepunch Studios). Every question is about Rust gameplay — ' +
           'monuments, loot, PvP, farming, base building, events like Oil Rig, Cargo Ship, ' +
           'Patrol Heli, Bradley, etc. Never assume a question is about anything other than ' +
-          'the game Rust. Answer in 1-2 short sentences. Keep your reply under 200 characters.',
+          'the game Rust. Answer in 1-2 short sentences. Keep your reply under 200 characters.\n\n' +
+          'ACCURATE RAID COSTS (use these exact numbers, do not guess):\n' +
+          'Wood Wall: 2 Rockets, 1 C4, 3 Satchels\n' +
+          'Stone Wall: 10 Rockets, 4 C4, 10 Satchels\n' +
+          'Sheet Metal Wall: 23 Rockets, 8 C4, 23 Satchels\n' +
+          'Armored Wall: 46 Rockets, 15 C4, 46 Satchels\n' +
+          'Wood Door: 2 Rockets, 1 C4, 2 Satchels\n' +
+          'Sheet Metal Door: 4 Rockets, 2 C4, 4 Satchels\n' +
+          'Garage Door: 9 Rockets, 3 C4, 9 Satchels\n' +
+          'Armored Door: 12 Rockets, 4 C4, 12 Satchels',
       },
       { role: 'user', content: question },
     ],
@@ -732,6 +741,74 @@ function askOllama(question, callback) {
 
   req.write(body);
   req.end();
+}
+
+// ---------------------------------------------------------------------------
+// Raid cost lookup — used by !raid team chat command
+// ---------------------------------------------------------------------------
+
+/**
+ * Ordered lookup table of raid costs.
+ * Entries are checked top-to-bottom — more specific entries (doors, garage)
+ * must come before generic wall entries so keyword matching doesn't false-fire.
+ */
+const RAID_TABLE = [
+  {
+    keys:    ['garage'],
+    label:   'Garage Door',
+    rockets: 9,  c4: 3,  satchels: 9,
+  },
+  {
+    keys:    ['armored door', 'armoured door', 'armor door', 'armour door'],
+    label:   'Armored Door',
+    rockets: 12, c4: 4,  satchels: 12,
+  },
+  {
+    keys:    ['sheet door', 'metal door', 'sheet metal door'],
+    label:   'Sheet Metal Door',
+    rockets: 4,  c4: 2,  satchels: 4,
+  },
+  {
+    keys:    ['wood door', 'wooden door'],
+    label:   'Wood Door',
+    rockets: 2,  c4: 1,  satchels: 2,
+  },
+  {
+    keys:    ['armored wall', 'armoured wall', 'armored', 'armoured'],
+    label:   'Armored Wall',
+    rockets: 46, c4: 15, satchels: 46,
+  },
+  {
+    keys:    ['sheet metal wall', 'sheet metal', 'metal wall', 'metal'],
+    label:   'Sheet Metal Wall',
+    rockets: 23, c4: 8,  satchels: 23,
+  },
+  {
+    keys:    ['stone wall', 'stone'],
+    label:   'Stone Wall',
+    rockets: 10, c4: 4,  satchels: 10,
+  },
+  {
+    keys:    ['wood wall', 'wooden wall', 'wood', 'wooden'],
+    label:   'Wood Wall',
+    rockets: 2,  c4: 1,  satchels: 3,
+  },
+];
+
+/**
+ * Look up raid costs for a target string using keyword matching.
+ * Returns the matching RAID_TABLE entry or null if not found.
+ * @param {string} target  — e.g. "stone wall", "garage", "metal door"
+ * @returns {object|null}
+ */
+function getRaidCost(target) {
+  const q = target.toLowerCase().trim();
+  for (const entry of RAID_TABLE) {
+    for (const key of entry.keys) {
+      if (q.includes(key)) return entry;
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -919,6 +996,18 @@ function wireConnectionEvents(connection) {
         }
       } catch (err) {
         console.warn('[Bot] !timers sendTeamMessage failed:', err.message);
+      }
+    } else if (cmd === '!raid') {
+      const target = text.slice('!raid'.length).trim();
+      if (!target) {
+        reply('Usage: !raid <target> — e.g. !raid stone, !raid metal door, !raid garage');
+        return;
+      }
+      const entry = getRaidCost(target);
+      if (!entry) {
+        reply(`Unknown target "${target}". Try: stone, metal, armored, sheet door, garage, armored door`);
+      } else {
+        reply(`\uD83E\uDDE8 ${entry.label}: ${entry.rockets} Rockets | ${entry.c4} C4 | ${entry.satchels} Satchels`);
       }
     } else if (cmd === '!ask') {
       const question = text.slice('!ask'.length).trim();
