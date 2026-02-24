@@ -212,11 +212,19 @@ function _tick(connection, state) {
       const bradleyPresent = markers.some((m) => m.type === MARKER_TYPE.EXPLOSION);
       const oilrigPresent  = markers.some(_isOilrigMarker);
 
-      // Process each tracked event
-      _processEvent(connection, state.timers.cargo,   'cargo',   cargoPresent);
-      _processEvent(connection, state.timers.heli,    'heli',    heliPresent);
-      _processEvent(connection, state.timers.bradley, 'bradley', bradleyPresent);
-      _processEvent(connection, state.timers.oilrig,  'oilrig',  oilrigPresent);
+      // Process each tracked event.
+      // On the very first tick after connect we just seed the baseline state
+      // without announcing anything — things already on the map aren't "new".
+      const isFirstTick = !state.initialized;
+      _processEvent(connection, state.timers.cargo,   'cargo',   cargoPresent,   isFirstTick);
+      _processEvent(connection, state.timers.heli,    'heli',    heliPresent,    isFirstTick);
+      _processEvent(connection, state.timers.bradley, 'bradley', bradleyPresent, isFirstTick);
+      _processEvent(connection, state.timers.oilrig,  'oilrig',  oilrigPresent,  isFirstTick);
+
+      if (isFirstTick) {
+        state.initialized = true;
+        console.log(`[MapPoller] Baseline set (${connection.serverIp}:${connection.serverPort}) — cargo=${cargoPresent} heli=${heliPresent} bradley=${bradleyPresent} oilrig=${oilrigPresent}`);
+      }
 
     } catch (err) {
       console.error(
@@ -233,8 +241,17 @@ function _tick(connection, state) {
  * @param {EventTimer} timer
  * @param {string} eventName  — 'cargo' | 'heli' | 'bradley' | 'oilrig'
  * @param {boolean} nowPresent  — true if the marker is on the map right now
+ * @param {boolean} isFirstTick — when true, silently initialise state without sending messages
  */
-function _processEvent(connection, timer, eventName, nowPresent) {
+function _processEvent(connection, timer, eventName, nowPresent, isFirstTick) {
+  if (isFirstTick) {
+    // First poll after connect — treat whatever is on the map as the baseline.
+    // Don't announce anything; the player already knows what's active.
+    timer.active    = nowPresent;
+    timer.spawnedAt = nowPresent ? new Date() : null;
+    return;
+  }
+
   if (nowPresent && !timer.active) {
     // ---- SPAWN ----
     timer.active     = true;
@@ -362,6 +379,8 @@ function startPoller(connection) {
   const state = {
     intervalHandle: null,
     mapSize: 0,
+    initialized: false, // set to true after first successful tick so we don't
+                        // fire spawn events for things already on map at connect
     timers: {
       cargo:   _blankTimer(),
       heli:    _blankTimer(),
