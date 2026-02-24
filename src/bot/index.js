@@ -796,12 +796,19 @@ function wireConnectionEvents(connection) {
 
     // Helper to send a response — works even if timers state is not yet populated
     function reply(msg) {
+      console.log(`[Bot] reply() called: rustClient=${rustClient ? 'ok' : 'NULL'}, msg="${msg}"`);
       try {
-        if (rustClient) rustClient.sendTeamMessage(msg, (res) => {
-          if (res && res.response && res.response.error) {
-            console.warn(`[Bot] ${cmd} reply error:`, res.response.error.error);
-          }
-        });
+        if (rustClient) {
+          rustClient.sendTeamMessage(msg, (res) => {
+            if (res && res.response && res.response.error) {
+              console.warn(`[Bot] ${cmd} reply error:`, res.response.error.error);
+            } else {
+              console.log(`[Bot] ${cmd} reply sent ok`);
+            }
+          });
+        } else {
+          console.warn(`[Bot] ${cmd} reply skipped — rustClient is null`);
+        }
       } catch (err) {
         console.warn(`[Bot] ${cmd} sendTeamMessage failed:`, err.message);
       }

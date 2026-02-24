@@ -188,7 +188,7 @@ function handlePairingNotification(data) {
   }
 
   try {
-    createConnection({
+    const newConn = createConnection({
       steamId:     steamId,
       playerToken: Number(playerToken),
       server: {
@@ -199,6 +199,20 @@ function handlePairingNotification(data) {
       channelId: (existingPairing && existingPairing.discord_channel_id) || undefined,
     });
     console.log(`[FCM] Connection established for ${ip}:${port}`);
+
+    // Wire Discord event handlers (team chat ! commands, event broadcasts).
+    // Must be called here because index.js Step 6 only runs at startup and
+    // won't re-wire connections created later by FCM pairing events.
+    if (newConn && !newConn._discordEventsWired) {
+      try {
+        const { wireConnectionEvents } = require('../bot/index.js');
+        newConn._discordEventsWired = true;
+        wireConnectionEvents(newConn);
+        console.log(`[FCM] Discord events wired for ${ip}:${port}`);
+      } catch (wireErr) {
+        console.error('[FCM] Error wiring Discord events:', wireErr.message);
+      }
+    }
   } catch (connErr) {
     console.error('[FCM] Error creating connection after FCM pairing:', connErr.message);
   }

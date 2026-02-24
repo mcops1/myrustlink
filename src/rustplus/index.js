@@ -426,6 +426,7 @@ class RustPlusConnection extends EventEmitter {
       time:       msg.time    || 0,
     };
 
+    console.log(`[RustPlus] Team chat: ${payload.playerName}: ${payload.message}`);
     safeLog(this.steamId, 'team_chat', payload);
 
     /**
@@ -717,6 +718,20 @@ function createConnection(config) {
 
   // --- ADDED: Start map marker poller (cargo / heli / bradley / oil rig) ---
   startPoller(connection);
+
+  // Wire Discord event-forwarding (team chat ! commands, alarm/cargo/heli events).
+  // Lazy require avoids circular dependency: bot/index.js → rustplus/index.js.
+  // The _discordEventsWired guard prevents duplicate wiring if the caller also
+  // calls wireConnectionEvents explicitly (index.js Step 6, web panel, /setup).
+  if (!connection._discordEventsWired) {
+    try {
+      const { wireConnectionEvents } = require('../bot/index.js');
+      connection._discordEventsWired = true;
+      wireConnectionEvents(connection);
+    } catch (wireErr) {
+      console.warn(`[RustPlus] Could not auto-wire Discord events for ${key}: ${wireErr.message}`);
+    }
+  }
 
   console.log(`[RustPlus] Connection created for ${key} (steamId: ${config.steamId})`);
   return connection;
