@@ -525,6 +525,10 @@ function getLiveCrateStatus(connection, callback) {
 
       const markers = (message.response && message.response.mapMarkers && message.response.mapMarkers.markers) || [];
 
+      // Debug: show all marker types present on the map
+      const typeCounts = {};
+      for (const m of markers) { typeCounts[m.type] = (typeCounts[m.type] || 0) + 1; }
+      console.log(`[MapPoller] !oil marker types on map:`, JSON.stringify(typeCounts));
 
       const crates = markers.filter((m) => m.type === MARKER_TYPE.CRATE);
 
