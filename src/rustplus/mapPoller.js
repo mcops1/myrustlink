@@ -25,10 +25,18 @@
 
 const MARKER_TYPE = {
   EXPLOSION:         2,  // Bradley APC (and other explosions — filtered by context)
+  CH47:              4,  // Chinook helicopter — appears when oil rig event is active
   CARGO_SHIP:        5,  // Cargo Ship
-  CRATE:             6,  // Locked Crate (Oil Rig locked crate)
+  CRATE:             6,  // Locked Crate — appears after Chinook leaves, or for supply drops
   PATROL_HELICOPTER: 8,  // Patrol Helicopter
 };
+
+// Oil rig events can show as either a CH47 marker (Chinook at the rig)
+// or a Crate marker (locked crate on the platform after Chinook leaves).
+// Both indicate an active oil rig event.
+function _isOilrigMarker(m) {
+  return m.type === MARKER_TYPE.CRATE || m.type === MARKER_TYPE.CH47;
+}
 
 // ---------------------------------------------------------------------------
 // Respawn windows (milliseconds) — used for "next in ~X" estimates
@@ -202,7 +210,7 @@ function _tick(connection, state) {
       const cargoPresent   = markers.some((m) => m.type === MARKER_TYPE.CARGO_SHIP);
       const heliPresent    = markers.some((m) => m.type === MARKER_TYPE.PATROL_HELICOPTER);
       const bradleyPresent = markers.some((m) => m.type === MARKER_TYPE.EXPLOSION);
-      const oilrigPresent  = markers.some((m) => m.type === MARKER_TYPE.CRATE);
+      const oilrigPresent  = markers.some(_isOilrigMarker);
 
       // Process each tracked event
       _processEvent(connection, state.timers.cargo,   'cargo',   cargoPresent);
@@ -525,21 +533,18 @@ function getLiveCrateStatus(connection, callback) {
 
       const markers = (message.response && message.response.mapMarkers && message.response.mapMarkers.markers) || [];
 
-      // Debug: show all marker types present on the map
-      const typeCounts = {};
-      for (const m of markers) { typeCounts[m.type] = (typeCounts[m.type] || 0) + 1; }
-      console.log(`[MapPoller] !oil marker types on map:`, JSON.stringify(typeCounts));
+      const oilMarkers = markers.filter(_isOilrigMarker);
 
-      const crates = markers.filter((m) => m.type === MARKER_TYPE.CRATE);
-
-      if (crates.length === 0) {
-        return callback('🛢️ No locked crates active on the map.');
+      if (oilMarkers.length === 0) {
+        return callback('🛢️ No oil rig events active on the map.');
       }
 
-      const lines = crates.map((crate, i) => {
-        const grid = _coordToGrid(crate.x || 0, crate.y || 0, mapSize);
-        const label = crates.length > 1 ? `Oil Rig Locked Crate #${i + 1}` : 'Oil Rig Locked Crate';
-        return `🛢️ ${label} active @ ${grid}`;
+      const lines = oilMarkers.map((m) => {
+        const grid = _coordToGrid(m.x || 0, m.y || 0, mapSize);
+        if (m.type === MARKER_TYPE.CH47) {
+          return `🚁 Oil Rig Chinook active @ ${grid}`;
+        }
+        return `🛢️ Oil Rig Locked Crate active @ ${grid}`;
       });
 
       callback(lines.join(' | '));
