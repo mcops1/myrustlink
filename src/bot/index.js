@@ -49,6 +49,10 @@ const {
   getLiveCrateStatus,
 } = require('../rustplus/mapPoller.js');
 
+// --- ADDED: BattleMetrics integration ---
+const bmApi     = require('../battlemetrics/api.js');
+const bmTracker = require('../battlemetrics/tracker.js');
+
 // ---------------------------------------------------------------------------
 // Discord client (exported so other modules may reference it if needed)
 // ---------------------------------------------------------------------------
@@ -136,6 +140,40 @@ const commandDefinitions = [
   new SlashCommandBuilder()
     .setName('timers')
     .setDescription('Show current Cargo, Heli, Bradley, and Oil Rig event timers'),
+
+  // --- ADDED: BattleMetrics commands ---
+  new SlashCommandBuilder()
+    .setName('track')
+    .setDescription('Track a player — get notified when they join or leave')
+    .addStringOption((opt) =>
+      opt.setName('name').setDescription('Player name to track').setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('untrack')
+    .setDescription('Stop tracking a player')
+    .addStringOption((opt) =>
+      opt.setName('name').setDescription('Player name to stop tracking').setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('online')
+    .setDescription('Show BattleMetrics player count and tracked players currently online'),
+
+  new SlashCommandBuilder()
+    .setName('whois')
+    .setDescription('Look up a player on BattleMetrics')
+    .addStringOption((opt) =>
+      opt.setName('name').setDescription('Player name to look up').setRequired(true)
+    ),
+
+  // --- ADDED: /stats command ---
+  new SlashCommandBuilder()
+    .setName('stats')
+    .setDescription('Get a player\'s wipe stats from moose.gg (Rusty Moose servers only)')
+    .addStringOption((opt) =>
+      opt.setName('name').setDescription('Player name to look up').setRequired(true)
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -637,19 +675,308 @@ async function handleTimers(interaction) {
 }
 
 // ---------------------------------------------------------------------------
+// BattleMetrics slash command handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the BM server ID for the guild's linked Rust server.
+ * Returns { pairing, bmServerId } or sends an error reply and returns null.
+ *
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @returns {Promise<{ pairing: object, bmServerId: string }|null>}
+ */
+async function resolveBmServer(interaction) {
+  const pairing = getPairingForGuild(interaction.guildId);
+  if (!pairing) {
+    await replyError(interaction, 'No Rust server linked to this guild. Use /setup first.');
+    return null;
+  }
+
+  let bmServerId = bmTracker.getBmServerId(pairing.rust_server_ip, pairing.rust_server_port);
+
+  if (!bmServerId) {
+    // Try to find + cache it now (may take a moment)
+    const conn = getConnection(pairing.rust_server_ip, pairing.rust_server_port);
+    if (conn) {
+      const row = await bmTracker.findAndCacheBmServer(conn).catch(() => null);
+      bmServerId = row ? row.bm_server_id : null;
+    }
+  }
+
+  if (!bmServerId) {
+    await replyError(
+      interaction,
+      'Could not find this server on BattleMetrics. ' +
+      'Make sure the server IP is publicly listed on battlemetrics.com.'
+    );
+    return null;
+  }
+
+  return { pairing, bmServerId };
+}
+
+/**
+ * /track name:<player>
+ * Find the player on BM and add them to the tracked_players table.
+ *
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ */
+async function handleTrack(interaction) {
+  await interaction.deferReply({ ephemeral: false });
+
+  const ctx = await resolveBmServer(interaction);
+  if (!ctx) return;
+
+  const name = interaction.options.getString('name', true);
+
+  let results;
+  try {
+    results = await bmApi.searchPlayer(name, ctx.bmServerId);
+  } catch (e) {
+    console.error('[Bot] /track BM search error:', e);
+    return replyError(interaction, `BattleMetrics search failed: ${e.message}`);
+  }
+
+  if (!results || results.length === 0) {
+    return replyError(
+      interaction,
+      `No player named **${name}** found on this server's BattleMetrics history.`
+    );
+  }
+
+  const player = results[0]; // best match
+
+  try {
+    db.prepare(`
+      INSERT INTO tracked_players (bm_server_id, bm_player_id, player_name, is_online, added_by)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(bm_server_id, bm_player_id) DO UPDATE SET
+        player_name = excluded.player_name,
+        added_by    = excluded.added_by
+    `).run(ctx.bmServerId, player.id, player.name, player.online ? 1 : 0, interaction.user.tag);
+  } catch (e) {
+    console.error('[Bot] /track DB error:', e);
+    return replyError(interaction, `Failed to save tracking entry: ${e.message}`);
+  }
+
+  const statusStr = player.online ? '🟢 Currently online' : '🔴 Currently offline';
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle('✅ Now Tracking Player')
+    .addFields(
+      { name: 'Player',  value: `**${player.name}**`,   inline: true },
+      { name: 'BM ID',   value: `\`${player.id}\``,     inline: true },
+      { name: 'Status',  value: statusStr,               inline: true },
+    )
+    .setDescription('You will be notified in team chat and Discord when this player joins or leaves.')
+    .setFooter({ text: 'BattleMetrics Tracker' })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
+  console.log(`[Bot] /track: ${interaction.user.tag} tracking "${player.name}" (${player.id})`);
+}
+
+/**
+ * /untrack name:<player>
+ * Remove a player from the tracked_players table.
+ *
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ */
+async function handleUntrack(interaction) {
+  await interaction.deferReply({ ephemeral: false });
+
+  const ctx = await resolveBmServer(interaction);
+  if (!ctx) return;
+
+  const name = interaction.options.getString('name', true).toLowerCase();
+
+  const row = db.prepare(
+    "SELECT * FROM tracked_players WHERE bm_server_id = ? AND lower(player_name) LIKE ?"
+  ).get(ctx.bmServerId, `%${name}%`);
+
+  if (!row) {
+    return replyError(interaction, `No tracked player matching **${name}** found.`);
+  }
+
+  db.prepare('DELETE FROM tracked_players WHERE id = ?').run(row.id);
+
+  const embed = new EmbedBuilder()
+    .setColor(0xffa500)
+    .setTitle('🛑 Stopped Tracking Player')
+    .setDescription(`**${row.player_name}** has been removed from the tracker.`)
+    .setFooter({ text: 'BattleMetrics Tracker' })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
+  console.log(`[Bot] /untrack: ${interaction.user.tag} untracked "${row.player_name}"`);
+}
+
+/**
+ * /online
+ * Show current BM player count and which tracked players are online.
+ *
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ */
+async function handleOnline(interaction) {
+  await interaction.deferReply({ ephemeral: false });
+
+  const ctx = await resolveBmServer(interaction);
+  if (!ctx) return;
+
+  let serverInfo;
+  try {
+    serverInfo = await bmApi.getServerInfo(ctx.bmServerId);
+  } catch (e) {
+    return replyError(interaction, `BattleMetrics request failed: ${e.message}`);
+  }
+
+  const trackedRows = db.prepare(
+    'SELECT * FROM tracked_players WHERE bm_server_id = ? ORDER BY player_name ASC'
+  ).all(ctx.bmServerId);
+
+  const onlineTracked  = trackedRows.filter((r) => r.is_online === 1);
+  const offlineTracked = trackedRows.filter((r) => r.is_online !== 1);
+
+  const trackedLines = [
+    ...onlineTracked.map( (r) => `🟢 ${r.player_name}`),
+    ...offlineTracked.map((r) => `🔴 ${r.player_name}`),
+  ];
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(`🌐 ${serverInfo ? serverInfo.name : 'Server'} — Player Info`)
+    .addFields(
+      {
+        name:   '👥 Online Now',
+        value:  serverInfo
+          ? `${serverInfo.players} / ${serverInfo.maxPlayers}`
+          : 'Unknown',
+        inline: true,
+      },
+      {
+        name:   '🎯 Tracked Players',
+        value:  trackedLines.length ? trackedLines.join('\n') : 'None tracked yet',
+        inline: false,
+      }
+    )
+    .setFooter({ text: 'BattleMetrics · updates every 60 s' })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
+/**
+ * /whois name:<player>
+ * Search BM for a player and display their profile.
+ *
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ */
+async function handleWhois(interaction) {
+  await interaction.deferReply({ ephemeral: false });
+
+  const ctx = await resolveBmServer(interaction);
+  if (!ctx) return;
+
+  const name = interaction.options.getString('name', true);
+
+  let results;
+  try {
+    results = await bmApi.searchPlayer(name, ctx.bmServerId);
+  } catch (e) {
+    return replyError(interaction, `BattleMetrics search failed: ${e.message}`);
+  }
+
+  if (!results || results.length === 0) {
+    return replyError(interaction, `No player named **${name}** found on this server's BM history.`);
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(`🔍 BattleMetrics — Whois: ${name}`)
+    .setFooter({ text: 'BattleMetrics Player Lookup' })
+    .setTimestamp();
+
+  const fields = results.slice(0, 5).map((p) => ({
+    name:   p.name,
+    value:  `BM ID: \`${p.id}\`\nStatus: ${p.online ? '🟢 Online' : '🔴 Offline'}\n[View Profile](https://www.battlemetrics.com/players/${p.id})`,
+    inline: true,
+  }));
+
+  embed.addFields(fields);
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
+/**
+ * /stats name:<player>
+ * Fetch wipe stats from moose.gg (Rusty Moose servers only).
+ *
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ */
+async function handleStats(interaction) {
+  await interaction.deferReply({ ephemeral: false });
+
+  const ctx = await resolveBmServer(interaction);
+  if (!ctx) return;
+
+  const name = interaction.options.getString('name', true);
+
+  // Look up the BM server name so we can pick the right moose.gg server
+  const bmRow = db.prepare('SELECT bm_server_name FROM bm_servers WHERE bm_server_id = ?')
+    .get(ctx.bmServerId);
+  const bmServerName = bmRow ? bmRow.bm_server_name : null;
+
+  let result;
+  try {
+    const moose = require('../stats/moose.js');
+    result = await moose.getMooseStats(name, bmServerName);
+  } catch (e) {
+    console.error('[Bot] /stats moose.gg error:', e);
+    return replyError(interaction, `Failed to fetch moose.gg stats: ${e.message}`);
+  }
+
+  if (result.error) {
+    return replyError(interaction, result.error);
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(`\uD83D\uDCCA Wipe Stats \u2014 ${result.name}`)
+    .addFields(
+      { name: '\u2694\uFE0F KDR',         value: result.kdr,       inline: true },
+      { name: '\uD83E\uDEA8 Sulfur Ore',  value: result.sulfurOre, inline: true },
+      { name: '\uD83D\uDE80 Rockets',     value: result.rockets,   inline: true },
+    )
+    .setDescription(`**Server:** ${result.server}\n**Wipe:** ${result.wipe}`)
+    .setFooter({ text: 'moose.gg · Rusty Moose Stats' })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
+  console.log(`[Bot] /stats: fetched stats for "${result.name}" on ${result.server}`);
+}
+
+// ---------------------------------------------------------------------------
 // Interaction router
 // ---------------------------------------------------------------------------
 
 /** @type {Map<string, (interaction: import('discord.js').ChatInputCommandInteraction) => Promise<void>>} */
 const commandHandlers = new Map([
-  ['setup',   handleSetup],
-  ['devices', handleDevices],
-  ['switch',  handleSwitch],
-  ['alarm',   handleAlarm],
-  ['storage', handleStorage],
-  ['status',  handleStatus],
-  ['say',     handleSay],
-  ['timers',  handleTimers],  // --- ADDED ---
+  ['setup',    handleSetup],
+  ['devices',  handleDevices],
+  ['switch',   handleSwitch],
+  ['alarm',    handleAlarm],
+  ['storage',  handleStorage],
+  ['status',   handleStatus],
+  ['say',      handleSay],
+  ['timers',   handleTimers],
+  // --- ADDED: BattleMetrics commands ---
+  ['track',    handleTrack],
+  ['untrack',  handleUntrack],
+  ['online',   handleOnline],
+  ['whois',    handleWhois],
+  // --- ADDED: moose.gg stats ---
+  ['stats',    handleStats],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -1050,6 +1377,124 @@ function wireConnectionEvents(connection) {
           console.log(`[Bot] !ask response: ${answer}`);
           reply(answer);
         }
+      });
+
+    // --- BattleMetrics team chat commands ---
+    } else if (cmd === '!track') {
+      const trackName = text.slice('!track'.length).trim();
+      if (!trackName) { reply('Usage: !track <playername>'); return; }
+
+      const bmServerId = bmTracker.getBmServerId(connection.serverIp, connection.serverPort);
+      if (!bmServerId) { reply('BattleMetrics not linked yet. Try again in a moment.'); return; }
+
+      bmApi.searchPlayer(trackName, bmServerId).then((results) => {
+        if (!results || results.length === 0) {
+          reply(`No player "${trackName}" found on BattleMetrics.`);
+          return;
+        }
+        const player = results[0];
+        db.prepare(`
+          INSERT INTO tracked_players (bm_server_id, bm_player_id, player_name, is_online, added_by)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(bm_server_id, bm_player_id) DO UPDATE SET
+            player_name = excluded.player_name,
+            added_by    = excluded.added_by
+        `).run(bmServerId, player.id, player.name, player.online ? 1 : 0,
+               payload.playerName || 'TeamChat');
+        const status = player.online ? '(online now)' : '(offline)';
+        reply(`\uD83D\uDFE2 Now tracking ${player.name} ${status}`);
+      }).catch((e) => {
+        console.error('[Bot] !track error:', e.message);
+        reply('BattleMetrics search failed. Try again later.');
+      });
+
+    } else if (cmd === '!untrack') {
+      const untrackName = text.slice('!untrack'.length).trim().toLowerCase();
+      if (!untrackName) { reply('Usage: !untrack <playername>'); return; }
+
+      const bmServerId = bmTracker.getBmServerId(connection.serverIp, connection.serverPort);
+      if (!bmServerId) { reply('BattleMetrics not linked yet.'); return; }
+
+      const row = db.prepare(
+        "SELECT * FROM tracked_players WHERE bm_server_id = ? AND lower(player_name) LIKE ?"
+      ).get(bmServerId, `%${untrackName}%`);
+
+      if (!row) {
+        reply(`No tracked player matching "${untrackName}" found.`);
+      } else {
+        db.prepare('DELETE FROM tracked_players WHERE id = ?').run(row.id);
+        reply(`\uD83D\uDED1 Stopped tracking ${row.player_name}`);
+      }
+
+    } else if (cmd === '!online') {
+      const bmServerId = bmTracker.getBmServerId(connection.serverIp, connection.serverPort);
+      if (!bmServerId) { reply('BattleMetrics not linked yet.'); return; }
+
+      bmApi.getServerInfo(bmServerId).then((info) => {
+        const trackedRows = db.prepare(
+          'SELECT * FROM tracked_players WHERE bm_server_id = ? ORDER BY player_name ASC'
+        ).all(bmServerId);
+
+        const lines = [];
+        if (info) lines.push(`\uD83C\uDF0E ${info.name}: ${info.players}/${info.maxPlayers} players`);
+
+        const onlineTracked = trackedRows.filter((r) => r.is_online === 1);
+        if (onlineTracked.length) {
+          lines.push('Tracked online: ' + onlineTracked.map((r) => r.player_name).join(', '));
+        } else if (trackedRows.length) {
+          lines.push('No tracked players currently online');
+        }
+
+        if (lines.length === 0) lines.push('BattleMetrics data not available');
+        for (const line of lines) reply(line);
+      }).catch(() => reply('BattleMetrics request failed.'));
+
+    } else if (cmd === '!whois') {
+      const whoisName = text.slice('!whois'.length).trim();
+      if (!whoisName) { reply('Usage: !whois <playername>'); return; }
+
+      const bmServerId = bmTracker.getBmServerId(connection.serverIp, connection.serverPort);
+      if (!bmServerId) { reply('BattleMetrics not linked yet.'); return; }
+
+      bmApi.searchPlayer(whoisName, bmServerId).then((results) => {
+        if (!results || results.length === 0) {
+          reply(`No player "${whoisName}" found on BattleMetrics.`);
+          return;
+        }
+        const lines = results.slice(0, 3).map(
+          (p) => `${p.online ? '\uD83D\uDFE2' : '\uD83D\uDD34'} ${p.name} — bm.io/players/${p.id}`
+        );
+        for (const line of lines) reply(line);
+      }).catch((e) => {
+        console.error('[Bot] !whois error:', e.message);
+        reply('BattleMetrics search failed.');
+      });
+
+    } else if (cmd === '!stats') {
+      const statsName = text.slice('!stats'.length).trim();
+      if (!statsName) { reply('Usage: !stats <playername>'); return; }
+
+      reply('\uD83D\uDD0D Looking up stats on moose.gg...');
+
+      const bmRow = db.prepare(
+        'SELECT bm_server_name FROM bm_servers WHERE rust_server_ip = ? AND rust_server_port = ?'
+      ).get(connection.serverIp, connection.serverPort);
+      const bmServerName = bmRow ? bmRow.bm_server_name : null;
+
+      const moose = require('../stats/moose.js');
+      moose.getMooseStats(statsName, bmServerName).then((result) => {
+        if (result.error) {
+          reply(result.error);
+        } else {
+          reply(
+            `\uD83D\uDCCA ${result.name} | KDR: ${result.kdr} | ` +
+            `Sulfur: ${result.sulfurOre} | Rockets: ${result.rockets} | ` +
+            `Wipe: ${result.wipe}`
+          );
+        }
+      }).catch((e) => {
+        console.error('[Bot] !stats error:', e.message);
+        reply('Failed to fetch moose.gg stats. Try again in a moment.');
       });
     }
     // Unknown !command — ignore silently

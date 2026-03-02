@@ -42,6 +42,8 @@ const { startWebServer }            = require('./src/web/index.js');
 const { startBot, client, wireConnectionEvents } = require('./src/bot/index.js');
 const { createConnection, getAllConnections, removeConnection } = require('./src/rustplus/index.js');
 const { startFcmListener, stopFcmListener } = require('./src/rustplus/fcmListener.js');
+const { startTracker, stopTracker }         = require('./src/battlemetrics/tracker.js');
+const { closeBrowser: closeMooseBrowser }   = require('./src/stats/moose.js');
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -187,7 +189,23 @@ async function bootstrap() {
   }
 
   // -------------------------------------------------------------------------
-  // Step 7: Start the FCM pairing listener (non-fatal if config is absent)
+  // Step 7: Start BattleMetrics tracker for each active connection
+  // -------------------------------------------------------------------------
+  try {
+    for (const conn of getAllConnections()) {
+      startTracker(conn).catch((err) =>
+        console.error(
+          `[App] BattleMetrics tracker error for ${conn.serverIp}:${conn.serverPort}:`,
+          err.message
+        )
+      );
+    }
+  } catch (err) {
+    console.error('[App] Error starting BattleMetrics trackers:', err.message);
+  }
+
+  // -------------------------------------------------------------------------
+  // Step 8: Start the FCM pairing listener (non-fatal if config is absent)
   // -------------------------------------------------------------------------
   try {
     await startFcmListener();
@@ -222,6 +240,18 @@ function shutdown(signal) {
       }
     }
   }
+
+  // Stop BattleMetrics trackers
+  try {
+    for (const conn of getAllConnections()) {
+      stopTracker(conn);
+    }
+  } catch (err) {
+    console.error('[App] Error stopping BattleMetrics trackers during shutdown:', err.message);
+  }
+
+  // Close moose.gg Puppeteer browser (if open)
+  closeMooseBrowser().catch(() => {});
 
   // Stop the FCM pairing listener
   try {

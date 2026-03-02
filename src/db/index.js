@@ -66,6 +66,27 @@ db.exec(`
     message     TEXT,
     timestamp   DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS bm_servers (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    rust_server_ip    TEXT NOT NULL,
+    rust_server_port  INTEGER NOT NULL,
+    bm_server_id      TEXT NOT NULL,
+    bm_server_name    TEXT,
+    last_updated      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(rust_server_ip, rust_server_port)
+  );
+
+  CREATE TABLE IF NOT EXISTS tracked_players (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    bm_server_id  TEXT NOT NULL,
+    bm_player_id  TEXT NOT NULL,
+    player_name   TEXT NOT NULL,
+    is_online     INTEGER DEFAULT 0,
+    added_by      TEXT,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(bm_server_id, bm_player_id)
+  );
 `);
 
 console.log(`[DB] Database initialised at ${dbPath}`);
